@@ -7,27 +7,30 @@ Some useful functions.
 
 @author: josephfutoma
 """
-
 import tensorflow as tf
 import numpy as np
-import sys
-from scipy.sparse import csr_matrix
-    
+
 def pad_rawdata(T,Y,ind_kf,ind_kt,X,meds_on_grid,covs):
     """ 
-    Helper func. Pad raw data so it's a padded array to be fed into the graph.
+    Helper func. Pad raw data so it's in a padded array to be fed into the graph,
+    since we can't pass in arrays of arrays directly.
     
     Inputs:
         arrays of data elements:
-            T: raw observation times
-            Y,ind_kf,ind_kt: observed lab/vitals; indices into Y (same size)
+            T: array of arrays, with raw observation times
+            Y,ind_kf,ind_kt: array of arrays;
+                observed lab/vitals,
+                indices into Y (same size)
             X: grid points
-            meds_on_grid: array; each grid_size x num_meds
-            covs: vector of baseline covariates. to be tiled and combined w meds
+            meds_on_grid: list of arrays, each is grid_size x num_meds
+            covs: matrix of baseline covariates for each patient. 
+                to be tiled at each time and combined w meds
     Returns:
         Padded 2d np arrays of data, now of dim batchsize x batch_maxlen
     """
     N = np.shape(T)[0] #num in batch
+    num_meds = np.shape(meds_on_grid[0])[1]
+    num_covs = np.shape(covs)[1]
     
     T_lens = np.array([len(t) for t in T])
     T_maxlen = np.max(T_lens)
@@ -110,17 +113,20 @@ def CG(A,b):
     
     return tf.reshape(x,[-1,1])
 
-def Lanczos(Sigma_func,n,b):
+def Lanczos(Sigma_func,b):
     """ Lanczos method to approximate Sigma^1/2 * b, with b random vec
     
+    Note: this only gives you a single draw though, which may not be ideal.
+    
     Inputs:
-        Sigma_func: function to premultiply a vector by Sigma, which isn't explicitly constructed
-        n: dim of Sigma
+        Sigma_func: function to premultiply a vector by Sigma, which you 
+            might not want to explicitly construct if it's huge.
         b: random vector of N(0,1)'
     
     Returns:
         random vector approximately equal to Sigma^1/2 * b
     """
+    n = tf.shape(b)[0]
     k = tf.div(n,500) + 3 #this many Lanczos iterations
 
     betas = tf.zeros(1)
@@ -154,7 +160,7 @@ def Lanczos(Sigma_func,n,b):
     H = tf.diag(alphas) + tf.pad(betas_,[[1,0],[0,1]]) + tf.pad(betas_,[[0,1],[1,0]])
     
     e,v = tf.self_adjoint_eig(H)
-    e_pos = tf.maximum(0.0,e)+1e-6
+    e_pos = tf.maximum(0.0,e)+1e-6 #make sure positive definite 
     e_sqrt = tf.diag(tf.sqrt(e_pos))
     sq_H = tf.matmul(v,tf.matmul(e_sqrt,tf.transpose(v)))
 
@@ -174,8 +180,10 @@ def block_CG(A_,B_):
     R = B_
     R_ = tf.matrix_set_diag(tf.zeros((n,m)),tf.ones([m]))
         
+    #somewhat arbitrary again, may want to check sensitivity
     CG_EPS = tf.cast(n/1000,"float")
     MAX_ITER = tf.div(n,250) + 3
+    
     def cond(i,X,R_,R,V_):
         return tf.logical_and(i < MAX_ITER, tf.norm(R) > CG_EPS)
     
@@ -195,15 +203,15 @@ def block_CG(A_,B_):
     i,X,_,_,_ = tf.while_loop(cond,body,[i,X,R_,R,V_])
     return X
 
-def block_Lanczos(Sigma_,B_):
+def block_Lanczos(Sigma_func,B_,n_mc_smps):
     """
     block Lanczos method to approx Sigma^1/2 * B, with B matrix of N(0,1)'s.
     Used to generate multiple approximate large normal draws.
     
     """
-    n = tf.shape(B_)[0]
-    s = tf.shape(B_)[1]
-    k = tf.div(n,500) + 3
+    n = tf.shape(B_)[0] #dim of the multivariate normal
+    s = n_mc_smps #number of samples to draw
+    k = tf.div(n,500) + 3 #number of Lanczos iterations
     
     betas = tf.zeros([1,s])
     alphas = tf.zeros([0,s])
@@ -217,7 +225,7 @@ def block_Lanczos(Sigma_,B_):
     #TODO: use block-CG in place of Sigma
     def body(j,alphas,betas,D):  
         d_j = tf.squeeze(tf.slice(D,[0,0,j],[-1,-1,1]))
-        d = tf.matmul(Sigma_,tf.transpose(d_j)) - (tf.slice(betas,[j-1,0],[1,-1])*
+        d = Sigma_func(tf.transpose(d_j)) - (tf.slice(betas,[j-1,0],[1,-1])*
                 tf.transpose(tf.squeeze(tf.slice(D,[0,0,j-1],[-1,-1,1]))))
         alphas = tf.concat([alphas,[tf.diag_part(tf.matmul(d_j,d))]],0)
         d = d - tf.slice(alphas,[j-1,0],[1,-1])*tf.transpose(d_j)
@@ -232,7 +240,7 @@ def block_Lanczos(Sigma_,B_):
     
     D_ = tf.slice(D,[0,0,1],[-1,-1,k])
     
-    ##TODO replace loop
+    ##TODO: replace loop
     H = tf.zeros([0,k,k])
     
     for ss in range(s):
@@ -245,8 +253,9 @@ def block_Lanczos(Sigma_,B_):
     
     E,V = tf.self_adjoint_eig(H)
     E_sqrt = tf.zeros([0,k,k])
-    #TODO: loop
+    #TODO: replace loop
     for ss in range(s): 
+        #ensure positive definite
         E_sqrt = tf.concat([E_sqrt,tf.expand_dims(tf.diag(tf.squeeze(tf.sqrt(tf.maximum(tf.slice(E,[ss,0],[1,-1]),1e-6)))),0)],0)
     sq_H = tf.matmul(V,tf.matmul(E_sqrt,tf.transpose(V,perm=[0,2,1])))
         
