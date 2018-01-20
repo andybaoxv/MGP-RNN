@@ -456,7 +456,7 @@ if __name__ == "__main__":
     with tf.variable_scope("",reuse=True):
         loss_reg = L2_penalty*tf.reduce_sum(tf.square(out_weights))
         for i in range(n_layers):
-            loss_reg = L2_penalty+tf.reduce_sum(tf.square(tf.get_variable('rnn/multi_rnn_cell/cell_'+str(i)+'/basic_lstm_cell/weights')))
+            loss_reg = L2_penalty+tf.reduce_sum(tf.square(tf.get_variable('rnn/multi_rnn_cell/cell_'+str(i)+'/basic_lstm_cell/kernel')))
     loss = loss_fit + loss_reg                  
     train_op = tf.train.AdamOptimizer(learning_rate).minimize(loss)
    
